@@ -1,3 +1,7 @@
+[![CircleCI](https://circleci.com/gh/transcovo/go-chpr-worker.svg?style=shield)](https://circleci.com/gh/transcovo/go-chpr-worker)
+[![codecov](https://codecov.io/gh/transcovo/go-chpr-worker/branch/master/graph/badge.svg)](https://codecov.io/gh/transcovo/go-chpr-worker)
+
+
 This library packages everything you need to implement a worker that
 takes tasks from AMQP messages.
 
