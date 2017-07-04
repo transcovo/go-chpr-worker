@@ -191,6 +191,11 @@ the AmqpWorker given as parameter, or if it is an empty string, a random and
 unique one is generated.
 */
 func (worker *AmqpWorker) Start(signals <-chan os.Signal) {
+	if len(worker.Handlers) > 1 {
+		panic("This worker doesn't support multiple handlers yet: " +
+			"https://github.com/transcovo/go-chpr-worker/issues/1")
+	}
+
 	if worker.ConsumerTag == "" {
 		data := consumerTagData{
 			ProgramName: os.Args[0],
