@@ -178,14 +178,14 @@ func (handler *testHandler) HandleMessage(msg []byte) error {
 	return handler.Error
 }
 
-func publishAMQPTestMessage(url, exchange, routingKey string) {
+func publishAMQPTestMessage(url, exchange, routingKey string, message string) {
 	conn, _ := amqp.Dial(url)
 	channel, _ := conn.Channel()
 
 	// XXX: wait for AMQP to start...
 	time.Sleep(50 * time.Millisecond)
 	channel.Publish(exchange, routingKey, false, false, amqp.Publishing{
-		Body: []byte("test"),
+		Body: []byte(message),
 	})
 }
 
@@ -258,7 +258,64 @@ func TestStartAMQP_OneHandlerSuccess(t *testing.T) {
 
 	go killWorkerAfter(closeChannel)
 
-	go publishAMQPTestMessage(worker.AmqpURL, worker.Exchange, key)
+	go publishAMQPTestMessage(worker.AmqpURL, worker.Exchange, key, "test")
+
+	worker.Start(sigs)
+}
+
+func TestStartAMQP_MultipleHandlersSuccess(t *testing.T) {
+	var (
+		keyOne              = "routing_key.one"
+		keyTwo              = "routing_key.two"
+		receivedHandlersOne = make(chan string)
+		receivedHandlersTwo = make(chan string)
+	)
+
+	purgeAMQPQueue(amqpURL, "queue_name")
+
+	sigs := make(chan os.Signal)
+	signal.Notify(sigs, syscall.SIGUSR1)
+
+	closeChannel := make(chan bool)
+
+	worker := AmqpWorker{
+		AmqpURL:     amqpURL,
+		Exchange:    "exchange_name",
+		Queue:       "queue_name",
+		ConsumerTag: "",
+		Handlers: []AmqpConsumer{
+			{
+				RoutingKey: keyOne,
+				Handler: &testHandler{
+					Error:      nil,
+					ResultChan: receivedHandlersOne,
+				}},
+			{
+				RoutingKey: keyTwo,
+				Handler: &testHandler{
+					Error:      nil,
+					ResultChan: receivedHandlersTwo,
+				}},
+		},
+	}
+
+	go func() {
+		// wait for the message handler
+		bodyOne := <-receivedHandlersOne
+		bodyTwo := <-receivedHandlersTwo
+		assert.Equal(t, "imthemessageforkeyone", bodyOne)
+		assert.Equal(t, "imthemessageforkeytwo", bodyTwo)
+
+		closeChannel <- true
+		<-receivedHandlersOne
+		<-receivedHandlersTwo
+		assert.Fail(t, "Should not have received a message")
+	}()
+
+	go killWorkerAfter(closeChannel)
+
+	go publishAMQPTestMessage(worker.AmqpURL, worker.Exchange, keyOne, "imthemessageforkeyone")
+	go publishAMQPTestMessage(worker.AmqpURL, worker.Exchange, keyTwo, "imthemessageforkeytwo")
 
 	worker.Start(sigs)
 }
@@ -304,7 +361,7 @@ func TestStartAMQP_DropOnErrorOnRedeliveredMessage(t *testing.T) {
 
 	go killWorkerAfter(closeChannel)
 
-	go publishAMQPTestMessage(worker.AmqpURL, worker.Exchange, key)
+	go publishAMQPTestMessage(worker.AmqpURL, worker.Exchange, key, "test")
 
 	worker.Start(sigs)
 }
@@ -361,7 +418,7 @@ func TestStartAMQP_DropOnPanicOnRedeliveredMessage(t *testing.T) {
 
 	go killWorkerAfter(closeChannel)
 
-	go publishAMQPTestMessage(worker.AmqpURL, worker.Exchange, key)
+	go publishAMQPTestMessage(worker.AmqpURL, worker.Exchange, key, "test")
 
 	worker.Start(sigs)
 }
@@ -407,7 +464,7 @@ func TestStartAMQP_OneHandlerUnknownError(t *testing.T) {
 		assert.Fail(t, "This message should not have been redelivered due to an unknown error")
 	}()
 
-	go publishAMQPTestMessage(worker.AmqpURL, worker.Exchange, key)
+	go publishAMQPTestMessage(worker.AmqpURL, worker.Exchange, key, "test")
 
 	worker.Start(sigs)
 }
@@ -499,4 +556,13 @@ func TestWaitAnyEndSignal_AmqpCloseConnection(t *testing.T) {
 		handlerEnd <- errors.New("I am the second handler getting out of the loop cleanly")
 	}()
 	waitAnyEndSignal(handlerEnd, nil, amqpCloseConnection, nil, 2)
+}
+
+/*
+TestFormatQueueName tests the formatting of the queue name
+*/
+func TestFormatQueueName(t *testing.T) {
+	queueName := formatQueueName("worker.queue", "routing.key")
+
+	assert.Equal(t, queueName, "worker.queue.routing.key")
 }
