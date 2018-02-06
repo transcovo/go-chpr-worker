@@ -90,7 +90,6 @@ var _ = Describe("Worker", func() {
 			res := getChannel(func() (*amqp.Channel, error) {
 				return channel, nil
 			})
-
 			Expect(res).To(Equal(channel))
 		})
 
@@ -212,7 +211,6 @@ var _ = Describe("Worker", func() {
 	})
 
 	Describe("#bindQueue()", func() {
-
 		It("should bind queue", func() {
 			var name, key, exchange string
 			var noWait bool
