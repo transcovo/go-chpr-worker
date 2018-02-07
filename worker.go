@@ -191,10 +191,7 @@ the AmqpWorker given as parameter, or if it is an empty string, a random and
 unique one is generated.
 */
 func (worker *AmqpWorker) Start(signals <-chan os.Signal) {
-	if len(worker.Handlers) > 1 {
-		panic("This worker doesn't support multiple handlers yet: " +
-			"https://github.com/transcovo/go-chpr-worker/issues/1")
-	}
+	var channels []*amqp.Channel
 
 	if worker.ConsumerTag == "" {
 		data := consumerTagData{
@@ -213,18 +210,22 @@ func (worker *AmqpWorker) Start(signals <-chan os.Signal) {
 
 	handlerEnd := make(chan error, len(worker.Handlers))
 
-	channel := getChannel(conn.Channel)
-
-	declareExchange(channel.ExchangeDeclare, worker.Exchange)
-
-	queue := declareQueue(channel.QueueDeclare, worker.Queue, nil)
-
-	setChannelQos(channel.Qos, worker.ChannelPrefetchCount)
-
 	for _, handler := range worker.Handlers {
-		bindQueue(channel.QueueBind, worker.Exchange, queue.Name, handler.RoutingKey)
+		formattedQueueName := formatQueueName(worker.Queue, handler.RoutingKey)
 
-		messages := consumeChannel(channel.Consume, worker.Queue, worker.ConsumerTag)
+		channel := getChannel(conn.Channel)
+
+		declareExchange(channel.ExchangeDeclare, worker.Exchange)
+
+		setChannelQos(channel.Qos, worker.ChannelPrefetchCount)
+
+		declareQueue(channel.QueueDeclare, formattedQueueName, nil)
+
+		bindQueue(channel.QueueBind, worker.Exchange, formattedQueueName, handler.RoutingKey)
+
+		messages := consumeChannel(channel.Consume, formattedQueueName, worker.ConsumerTag)
+
+		channels = append(channels, channel)
 		go handleMessages(messages, handler.Handler, handlerEnd)
 	}
 
@@ -233,7 +234,9 @@ func (worker *AmqpWorker) Start(signals <-chan os.Signal) {
 	go func() {
 		defer conn.Close()
 		<-endConnection
-		channel.Cancel(worker.ConsumerTag, false)
+		for _, channel := range channels {
+			channel.Cancel(worker.ConsumerTag, false)
+		}
 	}()
 	waitAnyEndSignal(handlerEnd, signals, notifyClose, endConnection, len(worker.Handlers))
 }
@@ -344,4 +347,11 @@ func waitAnyEndSignal(handlerEnd chan error, signals <-chan os.Signal, amqpClose
 		metrics.Increment("amqp.signals.amqp_lost_connection")
 	}
 	waitForHandlers(handlerEnd, handlerCount)
+}
+
+/*
+formatQueueName return the formatted queue name based on the base queue name and the routing key
+*/
+func formatQueueName(queueName string, routingKey string) string {
+	return fmt.Sprintf("%s.%s", queueName, routingKey)
 }
