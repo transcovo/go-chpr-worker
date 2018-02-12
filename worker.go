@@ -256,7 +256,8 @@ If no error is returned, the message is acked
 func handleMessages(messages <-chan amqp.Delivery, handler AmqpHandler, waitGroup *sync.WaitGroup) {
 	defer waitGroup.Done()
 	for msg := range messages {
-		go handleDeliveryWithRetry(msg, handler)
+		waitGroup.Add(1)
+		go handleDeliveryWithRetry(msg, handler, waitGroup)
 	}
 }
 
@@ -264,7 +265,8 @@ func handleMessages(messages <-chan amqp.Delivery, handler AmqpHandler, waitGrou
 handleDeliveryWithRetry is meant to be called as a goroutine looped over a channel.
 It wraps all the re-queuing mechanism.
 */
-func handleDeliveryWithRetry(msg amqp.Delivery, handler AmqpHandler) {
+func handleDeliveryWithRetry(msg amqp.Delivery, handler AmqpHandler, waitGroup *sync.WaitGroup) {
+	defer waitGroup.Done()
 	err := handleSingleMessage(msg, handler)
 	scopeLogger := logger.WithFields(logrus.Fields{
 		"msg":     msg,
