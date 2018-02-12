@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	"github.com/streadway/amqp"
@@ -72,6 +73,14 @@ type AmqpWorker struct {
 		Handlers is an array of AmqpConsumer to consume on AMQP.
 	*/
 	Handlers []AmqpConsumer
+	/*
+		ChannelCloseTimeout is the duration to wait between channels cancelation
+		and connection close.
+		It lets handlers finish their tasks after a close is required.
+		The higher it is, the more a task has time to finish its work
+		By default, it will not wait
+	*/
+	ChannelCloseTimeout time.Duration
 }
 
 type consumerTagData struct {
@@ -176,6 +185,7 @@ a channel to listen on system signals:
 		ChannelPrefetchCount: 0,
 		ConsumerTag:          "",
 		Handlers:             []lib.AmqpConsumer{lib.AmqpConsumer{RoutingKey: "routing_key", Handler: someHandler}},
+		ChannelCloseTimeout: 1*time.Second,
 	}
 
 	worker.Start(signals)
@@ -231,6 +241,9 @@ func (worker *AmqpWorker) Start(signals <-chan os.Signal) {
 		channel.Cancel(worker.ConsumerTag, false)
 	}
 	waitGroup.Wait()
+	// after we canceled the channels, we wait for a bit to let the handlers finish
+	// their tasks
+	time.Sleep(worker.ChannelCloseTimeout)
 }
 
 /*

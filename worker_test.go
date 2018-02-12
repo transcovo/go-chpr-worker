@@ -49,6 +49,10 @@ func publishAMQPTestMessage(url, exchange, routingKey string, message string) {
 func killWorkerAfter(closeChannel chan bool) {
 	<-closeChannel
 	waitABit()
+	killWorkerDirectly()
+}
+
+func killWorkerDirectly() {
 	process, _ := os.FindProcess(os.Getpid())
 	process.Signal(syscall.SIGUSR1)
 }
@@ -507,8 +511,6 @@ var _ = Describe("Worker", func() {
 				bodyTwo := <-receivedHandlersTwo
 
 				closeChannel <- true
-				<-receivedHandlersOne
-				<-receivedHandlersTwo
 				Expect(bodyOne).To(Equal("imthemessageforkeyone"))
 				Expect(bodyTwo).To(Equal("imthemessageforkeytwo"))
 			}()
@@ -559,7 +561,61 @@ var _ = Describe("Worker", func() {
 			go publishAMQPTestMessage(worker.AmqpURL, worker.Exchange, key, "test")
 
 			worker.Start(sigs)
+		})
 
+		It("should not wait too long before closing", func() {
+			routingKey := "routing_key"
+			receivedHandler := make(chan string)
+
+			purgeAMQPQueue(amqpURL, "queue_name")
+
+			sigs := make(chan os.Signal)
+			signal.Notify(sigs, syscall.SIGUSR1)
+
+			raceConditionChannel := make(chan struct{}, 1)
+			closeChannel := make(chan struct{})
+
+			worker := AmqpWorker{
+				AmqpURL:     amqpURL,
+				Exchange:    "exchange_name",
+				Queue:       "queue_name",
+				ConsumerTag: "",
+				Handlers: []AmqpConsumer{
+					{
+						RoutingKey: routingKey,
+						Handler: &testHandler{
+							Error:      nil,
+							ResultChan: receivedHandler,
+						},
+					},
+				},
+				ChannelCloseTimeout: 50 * time.Millisecond,
+			}
+
+			go func() {
+				// wait for the message handler
+				<-receivedHandler
+				// make the main goroutine to stop the worker
+				close(closeChannel)
+				// make it a bit faster than the timeout
+				// so it will close the channel before returning from start
+				time.Sleep(40 * time.Millisecond)
+				raceConditionChannel <- struct{}{}
+			}()
+
+			go func() {
+				<-closeChannel
+				killWorkerDirectly()
+			}()
+			// this should still be open
+
+			go publishAMQPTestMessage(worker.AmqpURL, worker.Exchange, routingKey, "test")
+
+			worker.Start(sigs)
+
+			// the handler should have had time to send its message
+			_, hasReceivedMessage := <-raceConditionChannel
+			Expect(hasReceivedMessage).To(BeTrue())
 		})
 
 		It("should return panic if start fails", func() {
