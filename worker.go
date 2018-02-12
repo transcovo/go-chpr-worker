@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"sync"
 
 	"github.com/sirupsen/logrus"
 	"github.com/streadway/amqp"
@@ -13,13 +14,6 @@ import (
 )
 
 var errDefaultRecover = errors.New("AMQP handler panicked")
-
-/*
-AmqpPublisher defines the methods an AMQP publisher must define.
-*/
-type AmqpPublisher interface {
-	Publish(exchange, key string, mandatory, immediate bool, msg amqp.Publishing) error
-}
 
 /*
 AmqpHandler interface represents a AMQP message handler.
@@ -205,11 +199,11 @@ func (worker *AmqpWorker) Start(signals <-chan os.Signal) {
 	if err != nil {
 		failOnError(err, "Failed to connect to RabbitMQ")
 	}
+	defer conn.Close()
 
 	notifyClose := conn.NotifyClose(make(chan *amqp.Error))
 
-	handlerEnd := make(chan error, len(worker.Handlers))
-
+	waitGroup := sync.WaitGroup{}
 	for _, handler := range worker.Handlers {
 		formattedQueueName := formatQueueName(worker.Queue, handler.RoutingKey)
 
@@ -226,19 +220,17 @@ func (worker *AmqpWorker) Start(signals <-chan os.Signal) {
 		messages := consumeChannel(channel.Consume, formattedQueueName, worker.ConsumerTag)
 
 		channels = append(channels, channel)
-		go handleMessages(messages, handler.Handler, handlerEnd)
+		waitGroup.Add(1)
+		go handleMessages(messages, handler.Handler, &waitGroup)
 	}
 
-	endConnection := make(chan int)
+	waitAnyEndSignal(signals, notifyClose)
 
-	go func() {
-		defer conn.Close()
-		<-endConnection
-		for _, channel := range channels {
-			channel.Cancel(worker.ConsumerTag, false)
-		}
-	}()
-	waitAnyEndSignal(handlerEnd, signals, notifyClose, endConnection, len(worker.Handlers))
+	// after this call, messages channels will be closed soon
+	for _, channel := range channels {
+		channel.Cancel(worker.ConsumerTag, false)
+	}
+	waitGroup.Wait()
 }
 
 /*
@@ -248,13 +240,11 @@ If an error on a correct message that has been redelivered ie failed before, the
 If an error on a incorrect message is returned, the message is not requeued but nacked (this would cause the queue to fill up)
 If no error is returned, the message is acked
 */
-func handleMessages(messages <-chan amqp.Delivery, handler AmqpHandler, done chan error) {
+func handleMessages(messages <-chan amqp.Delivery, handler AmqpHandler, waitGroup *sync.WaitGroup) {
+	defer waitGroup.Done()
 	for msg := range messages {
 		go handleDeliveryWithRetry(msg, handler)
 	}
-
-	logger.Info("[lib.amqp#handleMessages] Out of loop, done")
-	done <- nil
 }
 
 /*
@@ -312,41 +302,21 @@ func handleSingleMessage(msg amqp.Delivery, handler AmqpHandler) (err error) {
 		}
 	}()
 
-	err = handler.HandleMessage(msg.Body)
-	return
-}
-
-/*
-waitForHandlers blocks the reception
-*/
-func waitForHandlers(done chan error, handlersCount int) {
-	logger.Info("[lib.amqp#waitForHandlers] Shutdown, waiting for handlers to terminate")
-
-	for i := 0; i < handlersCount; i++ {
-		<-done
-	}
-	logger.Info("[lib.amqp#waitForHandlers] All handlers terminated")
+	return handler.HandleMessage(msg.Body)
 }
 
 /*
 waitAnyEndSignal allows the start function to receive any signal indicating a error in the worker and hence exiting safely
 */
-func waitAnyEndSignal(handlerEnd chan error, signals <-chan os.Signal, amqpCloseConnection chan *amqp.Error, endConnection chan int, handlerCount int) {
+func waitAnyEndSignal(signals <-chan os.Signal, amqpCloseConnection chan *amqp.Error) {
 	select {
-	case <-handlerEnd:
-		logger.Warning("[lib.amqp#waitAnyEndSignal] Received end signal from handleMessage function")
-		metrics.Increment("amqp.signals.handler_exited")
-		handlerCount--
-		endConnection <- 0
 	case signal := <-signals:
 		logger.WithField("signal", signal).Info("[lib.amqp#waitAnyEndSignal] Received signal from OS")
 		metrics.Increment("amqp.signals.os_exit")
-		endConnection <- 0
 	case amqpError := <-amqpCloseConnection:
 		logger.WithField("connectionError", amqpError).Error("[lib.amqp#waitAnyEndSignal] Received error from AMQP connection")
 		metrics.Increment("amqp.signals.amqp_lost_connection")
 	}
-	waitForHandlers(handlerEnd, handlerCount)
 }
 
 /*

@@ -584,56 +584,12 @@ var _ = Describe("Worker", func() {
 	})
 
 	Describe("#waitAnyEndSignal()", func() {
-		It("should receive end signal when handlerEnd receives message", func() {
-			handlerEnd := make(chan error)
-			endConnection := make(chan int, 1)
-
-			go func() {
-				handlerEnd <- errors.New("Some handler went bust")
-			}()
-			go func() {
-				handlerEnd <- errors.New("I am the second worker getting out of the line")
-			}()
-
-			waitAnyEndSignal(handlerEnd, nil, nil, endConnection, 2)
-			endSignal := <-endConnection
-			Expect(endSignal).To(Equal(0))
-		})
-
-		It("should receive end signal when signals receives message", func() {
-			signals := make(chan os.Signal)
-			handlerEnd := make(chan error)
-			endConnection := make(chan int, 1)
-			syncChan := make(chan int)
-
-			go func() {
-				signals <- nil
-				waitABit()
-				syncChan <- 0
-			}()
-			go func() {
-				<-syncChan
-				handlerEnd <- errors.New("I am the handler exiting correctly")
-				handlerEnd <- errors.New("I am the second handler getting out of the loop cleanly")
-			}()
-
-			waitAnyEndSignal(handlerEnd, signals, nil, endConnection, 2)
-
-			endSignal := <-endConnection
-			Expect(endSignal).To(Equal(0))
-		})
-
-		It("should receive end signal when amqpCloseConnection receives message", func() {
+		It("should return when message is received on amqpCloseConnection", func() {
+			sigs := make(chan os.Signal)
 			amqpCloseConnection := make(chan *amqp.Error, 1)
-			handlerEnd := make(chan error)
 
 			amqpCloseConnection <- &amqp.Error{}
-
-			go func() {
-				handlerEnd <- errors.New("I am the handler getting out of the loop cleanly")
-				handlerEnd <- errors.New("I am the second handler getting out of the loop cleanly")
-			}()
-			waitAnyEndSignal(handlerEnd, nil, amqpCloseConnection, nil, 2)
+			waitAnyEndSignal(sigs, amqpCloseConnection)
 		})
 	})
 })
