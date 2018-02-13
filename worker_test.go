@@ -49,6 +49,10 @@ func publishAMQPTestMessage(url, exchange, routingKey string, message string) {
 func killWorkerAfter(closeChannel chan bool) {
 	<-closeChannel
 	waitABit()
+	killWorkerDirectly()
+}
+
+func killWorkerDirectly() {
 	process, _ := os.FindProcess(os.Getpid())
 	process.Signal(syscall.SIGUSR1)
 }
@@ -90,7 +94,6 @@ var _ = Describe("Worker", func() {
 			res := getChannel(func() (*amqp.Channel, error) {
 				return channel, nil
 			})
-
 			Expect(res).To(Equal(channel))
 		})
 
@@ -212,7 +215,6 @@ var _ = Describe("Worker", func() {
 	})
 
 	Describe("#bindQueue()", func() {
-
 		It("should bind queue", func() {
 			var name, key, exchange string
 			var noWait bool
@@ -509,8 +511,6 @@ var _ = Describe("Worker", func() {
 				bodyTwo := <-receivedHandlersTwo
 
 				closeChannel <- true
-				<-receivedHandlersOne
-				<-receivedHandlersTwo
 				Expect(bodyOne).To(Equal("imthemessageforkeyone"))
 				Expect(bodyTwo).To(Equal("imthemessageforkeytwo"))
 			}()
@@ -561,7 +561,61 @@ var _ = Describe("Worker", func() {
 			go publishAMQPTestMessage(worker.AmqpURL, worker.Exchange, key, "test")
 
 			worker.Start(sigs)
+		})
 
+		It("should not wait too long before closing", func() {
+			routingKey := "routing_key"
+			receivedHandler := make(chan string)
+
+			purgeAMQPQueue(amqpURL, "queue_name")
+
+			sigs := make(chan os.Signal)
+			signal.Notify(sigs, syscall.SIGUSR1)
+
+			raceConditionChannel := make(chan struct{}, 1)
+			closeChannel := make(chan struct{})
+
+			worker := AmqpWorker{
+				AmqpURL:     amqpURL,
+				Exchange:    "exchange_name",
+				Queue:       "queue_name",
+				ConsumerTag: "",
+				Handlers: []AmqpConsumer{
+					{
+						RoutingKey: routingKey,
+						Handler: &testHandler{
+							Error:      nil,
+							ResultChan: receivedHandler,
+						},
+					},
+				},
+				ChannelCloseTimeout: 50 * time.Millisecond,
+			}
+
+			go func() {
+				// wait for the message handler
+				<-receivedHandler
+				// make the main goroutine to stop the worker
+				close(closeChannel)
+				// make it a bit faster than the timeout
+				// so it will close the channel before returning from start
+				time.Sleep(40 * time.Millisecond)
+				raceConditionChannel <- struct{}{}
+			}()
+
+			go func() {
+				<-closeChannel
+				killWorkerDirectly()
+			}()
+			// this should still be open
+
+			go publishAMQPTestMessage(worker.AmqpURL, worker.Exchange, routingKey, "test")
+
+			worker.Start(sigs)
+
+			// the handler should have had time to send its message
+			_, hasReceivedMessage := <-raceConditionChannel
+			Expect(hasReceivedMessage).To(BeTrue())
 		})
 
 		It("should return panic if start fails", func() {
@@ -586,56 +640,12 @@ var _ = Describe("Worker", func() {
 	})
 
 	Describe("#waitAnyEndSignal()", func() {
-		It("should receive end signal when handlerEnd receives message", func() {
-			handlerEnd := make(chan error)
-			endConnection := make(chan int, 1)
-
-			go func() {
-				handlerEnd <- errors.New("Some handler went bust")
-			}()
-			go func() {
-				handlerEnd <- errors.New("I am the second worker getting out of the line")
-			}()
-
-			waitAnyEndSignal(handlerEnd, nil, nil, endConnection, 2)
-			endSignal := <-endConnection
-			Expect(endSignal).To(Equal(0))
-		})
-
-		It("should receive end signal when signals receives message", func() {
-			signals := make(chan os.Signal)
-			handlerEnd := make(chan error)
-			endConnection := make(chan int, 1)
-			syncChan := make(chan int)
-
-			go func() {
-				signals <- nil
-				waitABit()
-				syncChan <- 0
-			}()
-			go func() {
-				<-syncChan
-				handlerEnd <- errors.New("I am the handler exiting correctly")
-				handlerEnd <- errors.New("I am the second handler getting out of the loop cleanly")
-			}()
-
-			waitAnyEndSignal(handlerEnd, signals, nil, endConnection, 2)
-
-			endSignal := <-endConnection
-			Expect(endSignal).To(Equal(0))
-		})
-
-		It("should receive end signal when amqpCloseConnection receives message", func() {
+		It("should return when message is received on amqpCloseConnection", func() {
+			sigs := make(chan os.Signal)
 			amqpCloseConnection := make(chan *amqp.Error, 1)
-			handlerEnd := make(chan error)
 
 			amqpCloseConnection <- &amqp.Error{}
-
-			go func() {
-				handlerEnd <- errors.New("I am the handler getting out of the loop cleanly")
-				handlerEnd <- errors.New("I am the second handler getting out of the loop cleanly")
-			}()
-			waitAnyEndSignal(handlerEnd, nil, amqpCloseConnection, nil, 2)
+			waitAnyEndSignal(sigs, amqpCloseConnection)
 		})
 	})
 })

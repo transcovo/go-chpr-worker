@@ -27,6 +27,7 @@ w := worker.AmqpWorker{
 				Handler:    myHandler,
 			},
 		},
+		ChannelCloseTimeout: 1*time.Second,
 	}
 
 // start the worker
