@@ -81,6 +81,10 @@ type AmqpWorker struct {
 		By default, it will not wait
 	*/
 	ChannelCloseTimeout time.Duration
+
+	// protects about data race condition on the channel
+	mu                  sync.RWMutex
+	requestCloseChannel chan chan struct{}
 }
 
 type consumerTagData struct {
@@ -205,6 +209,10 @@ func (worker *AmqpWorker) Start(signals <-chan os.Signal) {
 		worker.ConsumerTag = uniqueConsumerTag(&data)
 	}
 
+	worker.mu.Lock()
+	worker.requestCloseChannel = make(chan chan struct{})
+	worker.mu.Unlock()
+
 	conn, err := amqp.Dial(worker.AmqpURL)
 	if err != nil {
 		failOnError(err, "Failed to connect to RabbitMQ")
@@ -234,7 +242,12 @@ func (worker *AmqpWorker) Start(signals <-chan os.Signal) {
 		go handleMessages(messages, handler.Handler, &waitGroup)
 	}
 
-	waitAnyEndSignal(signals, notifyClose)
+	requestClose := waitAnyEndSignal(signals, notifyClose, worker.requestCloseChannel)
+	defer func() {
+		if requestClose != nil {
+			close(requestClose)
+		}
+	}()
 
 	// after this call, messages channels will be closed soon
 	for _, channel := range channels {
@@ -244,6 +257,20 @@ func (worker *AmqpWorker) Start(signals <-chan os.Signal) {
 	// after we canceled the channels, we wait for a bit to let the handlers finish
 	// their tasks
 	time.Sleep(worker.ChannelCloseTimeout)
+}
+
+// Stop stops a running worker. If it is not running, it returns directly
+func (worker *AmqpWorker) Stop() {
+	worker.mu.RLock()
+	requestCloseChan := worker.requestCloseChannel
+	worker.mu.RUnlock()
+
+	if requestCloseChan == nil {
+		return
+	}
+	requestClose := make(chan struct{})
+	requestCloseChan <- requestClose
+	<-requestClose
 }
 
 /*
@@ -256,7 +283,8 @@ If no error is returned, the message is acked
 func handleMessages(messages <-chan amqp.Delivery, handler AmqpHandler, waitGroup *sync.WaitGroup) {
 	defer waitGroup.Done()
 	for msg := range messages {
-		go handleDeliveryWithRetry(msg, handler)
+		waitGroup.Add(1)
+		go handleDeliveryWithRetry(msg, handler, waitGroup)
 	}
 }
 
@@ -264,7 +292,8 @@ func handleMessages(messages <-chan amqp.Delivery, handler AmqpHandler, waitGrou
 handleDeliveryWithRetry is meant to be called as a goroutine looped over a channel.
 It wraps all the re-queuing mechanism.
 */
-func handleDeliveryWithRetry(msg amqp.Delivery, handler AmqpHandler) {
+func handleDeliveryWithRetry(msg amqp.Delivery, handler AmqpHandler, waitGroup *sync.WaitGroup) {
+	defer waitGroup.Done()
 	err := handleSingleMessage(msg, handler)
 	scopeLogger := logger.WithFields(logrus.Fields{
 		"msg":     msg,
@@ -321,14 +350,19 @@ func handleSingleMessage(msg amqp.Delivery, handler AmqpHandler) (err error) {
 /*
 waitAnyEndSignal allows the start function to receive any signal indicating a error in the worker and hence exiting safely
 */
-func waitAnyEndSignal(signals <-chan os.Signal, amqpCloseConnection chan *amqp.Error) {
+func waitAnyEndSignal(signals <-chan os.Signal, amqpCloseConnection <-chan *amqp.Error, requestCloseChannel <-chan chan struct{}) chan struct{} {
 	select {
 	case signal := <-signals:
 		logger.WithField("signal", signal).Info("[lib.amqp#waitAnyEndSignal] Received signal from OS")
 		metrics.Increment("amqp.signals.os_exit")
+		return nil
 	case amqpError := <-amqpCloseConnection:
 		logger.WithField("connectionError", amqpError).Error("[lib.amqp#waitAnyEndSignal] Received error from AMQP connection")
 		metrics.Increment("amqp.signals.amqp_lost_connection")
+		return nil
+	case requestClose := <-requestCloseChannel:
+		logger.Info("[lib.amqp#waitAnyEndSignal] Close requested")
+		return requestClose
 	}
 }
 

@@ -645,7 +645,69 @@ var _ = Describe("Worker", func() {
 			amqpCloseConnection := make(chan *amqp.Error, 1)
 
 			amqpCloseConnection <- &amqp.Error{}
-			waitAnyEndSignal(sigs, amqpCloseConnection)
+			requestClose := waitAnyEndSignal(sigs, amqpCloseConnection, nil)
+
+			Expect(requestClose).To(BeNil())
+		})
+
+		It("should return requestClose when requesting close", func() {
+			sigs := make(chan os.Signal)
+			amqpCloseConnection := make(chan *amqp.Error, 1)
+			requestCloseChannel := make(chan chan struct{}, 1)
+
+			wantedRequestClose := make(chan struct{})
+			requestCloseChannel <- wantedRequestClose
+			requestClose := waitAnyEndSignal(sigs, amqpCloseConnection, requestCloseChannel)
+
+			Expect(requestClose).To(Equal(wantedRequestClose))
+		})
+	})
+
+	Describe("#Stop()", func() {
+		It("should do nothing if worker is not started yet", func() {
+			worker := AmqpWorker{
+				AmqpURL:     "invalid_url",
+				Exchange:    "exchange_name",
+				Queue:       "queue_name",
+				ConsumerTag: "",
+				Handlers:    []AmqpConsumer{},
+			}
+
+			fn := func() { worker.Stop() }
+
+			Expect(fn).ToNot(Panic())
+		})
+
+		It("should stop the worker", func() {
+			routingKey := "routing_key"
+			worker := AmqpWorker{
+				AmqpURL:     amqpURL,
+				Exchange:    "exchange_name",
+				Queue:       "queue_name",
+				ConsumerTag: "",
+				Handlers: []AmqpConsumer{
+					{
+						RoutingKey: routingKey,
+						Handler:    nil,
+					},
+				},
+				ChannelCloseTimeout: 50 * time.Millisecond,
+			}
+
+			// will be closed when Start returns
+			closedChan := make(chan struct{})
+			sigs := make(chan os.Signal)
+
+			go func() {
+				worker.Start(sigs)
+				close(closedChan)
+			}()
+
+			waitABit()
+
+			worker.Stop()
+			// will block forever and make the test timeout if start does not return
+			<-closedChan
 		})
 	})
 })
