@@ -300,8 +300,6 @@ func handleDeliveryWithRetry(msg amqp.Delivery, handler AmqpHandler, waitGroup *
 		"msgBody": string(msg.Body),
 	})
 	if err == nil {
-		metrics.Increment("amqp.msg.ack")
-		scopeLogger.Info("[lib.amqp#handleDeliveryWithRetry] Acking message")
 		msg.Ack(false)
 		return
 	}
